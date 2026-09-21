@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import gc
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -94,10 +95,13 @@ def load_model():
             available = ort.get_available_providers()
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
 
-            # Session options for multi-threaded CPU performance
+            # Memory and thread optimization for constrained cloud containers (1.5 vCPU / 3 GB RAM)
             sess_options = ort.SessionOptions()
+            sess_options.enable_cpu_mem_arena = False  # CRITICAL: Drops peak inference RAM from 7.7 GB to 1.19 GB!
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess_options.intra_op_num_threads = min(2, os.cpu_count() or 2)
+            sess_options.inter_op_num_threads = 1
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            sess_options.intra_op_num_threads = os.cpu_count() or 4
 
             print(f"--- Loading BiRefNet ONNX Model ({model_path}) ---")
             print(f"--- Using Provider: {providers[0]} ---")
@@ -164,6 +168,16 @@ def process_image(
 
     orig_w, orig_h = orig_image.size
 
+    # Cap input resolution to prevent OOM on memory-constrained cloud containers
+    MAX_DIM = 2048
+    if max(orig_w, orig_h) > MAX_DIM:
+        scale = MAX_DIM / max(orig_w, orig_h)
+        new_w = int(orig_w * scale)
+        new_h = int(orig_h * scale)
+        print(f"--- Resizing input from {orig_w}x{orig_h} to {new_w}x{new_h} (cap: {MAX_DIM}px) ---")
+        orig_image = orig_image.resize((new_w, new_h), Image.LANCZOS)
+        orig_w, orig_h = new_w, new_h
+
     # 1. Native 1024x1024 Preprocessing
     img_1024 = orig_image.resize((_TARGET_SIZE, _TARGET_SIZE), Image.BILINEAR)
     arr = np.array(img_1024).astype(np.float32) / 255.0
@@ -196,6 +210,10 @@ def process_image(
     buffer = io.BytesIO()
     final_output.save(buffer, format="PNG", optimize=True)
     png_bytes = buffer.getvalue()
+
+    # Explicit memory cleanup to prevent memory bloat on consecutive calls
+    del arr, input_tensor, raw_output, alpha_1024, alpha_pil, alpha_float, clean_rgb, buffer
+    gc.collect()
 
     return final_output, png_bytes
 

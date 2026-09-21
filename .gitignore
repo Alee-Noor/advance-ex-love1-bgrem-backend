@@ -13,3 +13,4 @@ venv/
 *.onnx
 models/*.onnx
 .DS_Store
+frontend/
