@@ -9,8 +9,13 @@ from pathlib import Path
 from typing import Union, Tuple, Optional
 
 
-# Global ONNX session cache
+import threading
+
+# Global ONNX session cache & thread synchronization
 _GLOBAL_SESSION = None
+_SESSION_LOCK = threading.Lock()
+_SESSION_STATUS = "idle"  # "idle", "loading", "ready", "error"
+_SESSION_ERROR = None
 _MODEL_NAME = "BiRefNet-general"
 _MODEL_FILENAME = "birefnet-general.onnx"
 _MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-epoch_244.onnx"
@@ -19,6 +24,16 @@ _TARGET_SIZE = 1024
 # Normalization constants (ImageNet standard matching BiRefNet training)
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def get_status() -> str:
+    """Returns current model status: 'idle', 'loading', 'ready', or 'error'."""
+    return _SESSION_STATUS
+
+
+def is_ready() -> bool:
+    """Returns True if the ONNX session is initialized and ready for inference."""
+    return _GLOBAL_SESSION is not None
 
 
 def get_model_path() -> str:
@@ -47,43 +62,55 @@ def get_device() -> str:
 
 def load_model():
     """
-    Initializes and warms up the ONNX Runtime InferenceSession once.
+    Initializes and warms up the ONNX Runtime InferenceSession in a thread-safe manner.
     Auto-downloads the model if not present.
     """
-    global _GLOBAL_SESSION
+    global _GLOBAL_SESSION, _SESSION_STATUS, _SESSION_ERROR
     if _GLOBAL_SESSION is not None:
         return _GLOBAL_SESSION
 
-    model_path = get_model_path()
-    if not os.path.exists(model_path):
-        print(f"--- BiRefNet ONNX model not found locally at {model_path} ---")
-        print(f"--- Downloading from {_MODEL_URL} (~927 MB)... ---")
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        import urllib.request
-        def _reporthook(count, block_size, total_size):
-            if total_size > 0:
-                percent = int(count * block_size * 100 / total_size)
-                if count % 2000 == 0:
-                    sys.stdout.write(f"\rDownloading model: {percent}%")
-                    sys.stdout.flush()
-        urllib.request.urlretrieve(_MODEL_URL, model_path, _reporthook)
-        print("\n--- Model download complete! ---")
+    with _SESSION_LOCK:
+        if _GLOBAL_SESSION is not None:
+            return _GLOBAL_SESSION
 
-    # Configure execution providers (CUDA if available, otherwise CPU)
-    available = ort.get_available_providers()
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
+        _SESSION_STATUS = "loading"
+        try:
+            model_path = get_model_path()
+            if not os.path.exists(model_path):
+                print(f"--- BiRefNet ONNX model not found locally at {model_path} ---")
+                print(f"--- Downloading from {_MODEL_URL} (~927 MB)... ---")
+                os.makedirs(os.path.dirname(model_path), exist_ok=True)
+                import urllib.request
+                def _reporthook(count, block_size, total_size):
+                    if total_size > 0:
+                        percent = int(count * block_size * 100 / total_size)
+                        if count % 2000 == 0:
+                            sys.stdout.write(f"\rDownloading model: {percent}%")
+                            sys.stdout.flush()
+                urllib.request.urlretrieve(_MODEL_URL, model_path, _reporthook)
+                print("\n--- Model download complete! ---")
 
-    # Session options for multi-threaded CPU performance
-    sess_options = ort.SessionOptions()
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess_options.intra_op_num_threads = os.cpu_count() or 4
+            # Configure execution providers (CUDA if available, otherwise CPU)
+            available = ort.get_available_providers()
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
 
-    print(f"--- Loading BiRefNet ONNX Model ({model_path}) ---")
-    print(f"--- Using Provider: {providers[0]} ---")
-    session = ort.InferenceSession(model_path, sess_options, providers=providers)
-    _GLOBAL_SESSION = session
-    print("--- BiRefNet ONNX engine is ready for inference ---")
-    return _GLOBAL_SESSION
+            # Session options for multi-threaded CPU performance
+            sess_options = ort.SessionOptions()
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_options.intra_op_num_threads = os.cpu_count() or 4
+
+            print(f"--- Loading BiRefNet ONNX Model ({model_path}) ---")
+            print(f"--- Using Provider: {providers[0]} ---")
+            session = ort.InferenceSession(model_path, sess_options, providers=providers)
+            _GLOBAL_SESSION = session
+            _SESSION_STATUS = "ready"
+            print("--- BiRefNet ONNX engine is ready for inference ---")
+            return _GLOBAL_SESSION
+        except Exception as e:
+            _SESSION_STATUS = "error"
+            _SESSION_ERROR = str(e)
+            print(f"--- Failed to load BiRefNet model: {e} ---")
+            raise
 
 
 def decontaminate_hair_color(image_rgb: np.ndarray, alpha_float: np.ndarray, bg_blur_radius: int = 31) -> np.ndarray:

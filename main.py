@@ -6,6 +6,7 @@ Delegates all AI and image processing to 'remover-birefnet-inference.py'.
 """
 
 import os
+import asyncio
 import importlib
 from contextlib import asynccontextmanager
 
@@ -18,12 +19,14 @@ remover = importlib.import_module("remover-birefnet-inference")
 
 
 # ---------------------------------------------------------------------
-# Application Lifespan: Pre-loads model into memory on server startup
+# Application Lifespan: Warmed up in background so server binds port immediately
 # ---------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load BiRefNet model once into memory
-    remover.load_model()
+    # Start model warmup in background thread
+    # This allows FastAPI & Uvicorn to bind port immediately (<1 sec)
+    # so Azure Container Apps ingress detects the app as Ready without timing out
+    asyncio.create_task(asyncio.to_thread(remover.load_model))
     yield
     print("[API] Background removal service shut down.")
 
@@ -58,6 +61,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "birefnet-bg-remover",
+        "model_status": remover.get_status(),
         "device": remover.get_device(),
         "model": remover._MODEL_NAME
     }
@@ -87,13 +91,18 @@ async def remove_background(
                 detail="Uploaded file is empty."
             )
 
-        # 3. Perform background removal using remover-birefnet-inference
-        _, png_bytes = remover.process_image(
+        # 3. Ensure model is loaded (wait if still loading during initial boot)
+        if not remover.is_ready():
+            await asyncio.to_thread(remover.load_model)
+
+        # 4. Perform background removal in worker thread so event loop remains responsive
+        _, png_bytes = await asyncio.to_thread(
+            remover.process_image,
             input_data=image_bytes,
             decontaminate=decontaminate
         )
 
-        # 4. Stream back transparent PNG
+        # 5. Stream back transparent PNG
         base_name = os.path.splitext(file.filename or "image")[0]
         output_filename = f"{base_name}_transparent.png"
 
@@ -117,5 +126,7 @@ async def remove_background(
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.environ.get("PORT", 8000))
     # Run locally with auto-reload
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
