@@ -30,6 +30,8 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: bgremoverregistry.azurecr.io/birefnet-backend:latest
+          tags: |
+            bgremoverregistry.azurecr.io/birefnet-backend:latest
+            bgremoverregistry.azurecr.io/birefnet-backend:v2
           cache-from: type=gha
           cache-to: type=gha,mode=max

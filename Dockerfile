@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
 
 # Install lightweight dependencies (ONNX Runtime, FastAPI, OpenCV, Pillow)
 COPY requirements.txt .

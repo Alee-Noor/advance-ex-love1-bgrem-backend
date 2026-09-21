@@ -61,6 +61,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "birefnet-bg-remover",
+        "version": "2.0.0-optimized",
         "model_status": remover.get_status(),
         "device": remover.get_device(),
         "model": remover._MODEL_NAME
